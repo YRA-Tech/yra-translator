@@ -5,11 +5,14 @@ A Chrome extension that provides full-page text translation using Chrome's new T
 ## Features
 
 - **Full-page translation**: Translates all visible text on web pages
+- **Selection translation**: if you select a portion of the page, and then choose Translate Selection from the popup, it will translate only the selected portion
+- **Automatic language model download**: Google's new translation API relies on locally stored language models. If you haven't downloaded the models yet, they'll be downloaded as needed when you select new target languages
 - **ARIA attributes translation**: Translates accessibility attributes like `aria-label`, `title`, `alt`, etc.
 - **Built-in Translation API**: Uses Chrome's native Translation API for fast, offline translation
 - **Language auto-detection**: Automatically detects source language
 - **Restore functionality**: Easily restore original text
 - **Multiple language support**: Supports 12+ languages
+- **Works with iframes**: You should be able to use this with iframed content.
 
 ## Requirements
 
