@@ -57,6 +57,3 @@ The extension automatically checks if the Translation API is available. If not a
 
 English, Spanish, French, German, Italian, Portuguese, Russian, Japanese, Korean, Chinese, Arabic, Hindi
 
-## Development
-
-The extension uses Chrome's experimental Translation API. For production use, ensure your target users have compatible hardware and Chrome versions.
