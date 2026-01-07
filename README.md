@@ -51,7 +51,7 @@ The extension automatically checks if the Translation API is available. If not a
 - `injected.js` - Translation API wrapper
 - `popup.html/js` - Extension popup interface
 - `background.js` - Service worker for notifications
-- `icons/` - Extension icons (add your own)
+- `icons/` - Extension icons
 
 ## Supported Languages
 
