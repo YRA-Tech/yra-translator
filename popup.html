@@ -191,6 +191,55 @@
       display: none;
     }
 
+    .section-divider {
+      border-top: 1px solid #e9ecef;
+      margin: 16px 0;
+    }
+
+    .nllb-section .section-label {
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: #6c757d;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+    }
+
+    .auth-bar {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 6px 12px;
+      margin-bottom: 12px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+    }
+
+    .auth-bar.logged-out {
+      background: #e9ecef;
+      color: #495057;
+    }
+
+    .auth-bar.logged-in {
+      background: #d4edda;
+      color: #155724;
+    }
+
+    .auth-bar .auth-link {
+      background: none;
+      border: none;
+      color: #007bff;
+      cursor: pointer;
+      font-size: 0.85rem;
+      padding: 0;
+      text-decoration: underline;
+    }
+
+    .auth-bar .auth-link:hover {
+      color: #0056b3;
+    }
+
     .options {
       margin: 12px 0;
     }
@@ -251,6 +300,11 @@
     <h1>YRA Translator</h1>
   </div>
 
+  <div id="authBar" class="auth-bar logged-out">
+    <span id="authLabel">Sign in for 200+ languages</span>
+    <button id="authButton" class="auth-link">Sign In</button>
+  </div>
+
   <div id="apiStatus" role="status" class="api-status unavailable">
     Checking API availability...
   </div>
@@ -300,6 +354,21 @@
     </div>
   </div>
 
+  <div id="nllbSection" class="nllb-section hidden">
+    <div class="section-divider"></div>
+    <div class="section-label">NLLB Languages (Cloud)</div>
+    <div class="language-selector">
+      <div class="language-row">
+        <label for="nllbTargetLanguage">To:</label>
+        <select id="nllbTargetLanguage">
+        </select>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn btn-primary" id="nllbTranslateButton">Translate (Cloud)</button>
+    </div>
+  </div>
+
   <div class="options">
     <div class="checkbox-wrapper">
       <input type="checkbox" id="addLangAttributes" checked>
@@ -318,6 +387,8 @@
     <div class="progress-bar" id="progressBar"></div>
   </div>
 
+  <script src="auth.js"></script>
+  <script src="nllb-languages.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>
