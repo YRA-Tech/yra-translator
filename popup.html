@@ -202,7 +202,17 @@
       color: #6c757d;
       text-transform: uppercase;
       letter-spacing: 0.5px;
-      margin-bottom: 8px;
+      margin-bottom: 12px;
+    }
+
+    .nllb-notice {
+      font-size: 0.75rem;
+      color: #856404;
+      background: #fff3cd;
+      border: 1px solid #ffeaa7;
+      border-radius: 6px;
+      padding: 6px 10px;
+      text-align: center;
     }
 
     .auth-bar {
@@ -415,21 +425,6 @@
       </div>
     </div>
 
-    <div id="nllbSection" class="nllb-section hidden">
-      <div class="section-divider"></div>
-      <div class="section-label">NLLB Languages (Cloud)</div>
-      <div class="language-selector">
-        <div class="language-row">
-          <label for="nllbTargetLanguage">To:</label>
-          <select id="nllbTargetLanguage">
-          </select>
-        </div>
-      </div>
-      <div class="actions">
-        <button class="btn btn-primary" id="nllbTranslateButton">Translate (Cloud)</button>
-      </div>
-    </div>
-
     <div class="options">
       <div class="checkbox-wrapper">
         <input type="checkbox" id="addLangAttributes" checked>
@@ -441,6 +436,28 @@
       <button class="btn btn-primary" id="translateButton">Translate Page</button>
       <button class="btn btn-primary" id="translateSelectionButton" style="display: none;">Translate Selection</button>
       <button class="btn btn-secondary" id="restoreButton">Restore</button>
+    </div>
+
+    <div id="nllbSection" class="nllb-section hidden">
+      <div class="section-divider"></div>
+      <div class="section-label">Cloud Translation (200+ Languages)</div>
+
+      <div class="language-selector">
+        <div class="language-row">
+          <label for="nllbTargetLanguage">To:</label>
+          <select id="nllbTargetLanguage">
+          </select>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button class="btn btn-primary" id="nllbTranslateButton">Translate Page (Cloud)</button>
+        <button class="btn btn-secondary" id="nllbRestoreButton">Restore</button>
+      </div>
+
+      <div id="nllbNotice" class="nllb-notice">
+        Page content will be sent to YRA Tech servers for translation.
+      </div>
     </div>
 
     <div id="status" role="status" class="status hidden"></div>

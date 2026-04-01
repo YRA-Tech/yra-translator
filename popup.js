@@ -16,6 +16,7 @@ class PopupController {
       nllbSection: document.getElementById('nllbSection'),
       nllbTargetLanguage: document.getElementById('nllbTargetLanguage'),
       nllbTranslateButton: document.getElementById('nllbTranslateButton'),
+      nllbRestoreButton: document.getElementById('nllbRestoreButton'),
       authBar: document.getElementById('authBar'),
       authLabel: document.getElementById('authLabel'),
       authButton: document.getElementById('authButton'),
@@ -76,6 +77,10 @@ class PopupController {
 
     this.elements.nllbTargetLanguage.addEventListener('change', () => {
       this.saveSettings();
+    });
+
+    this.elements.nllbRestoreButton.addEventListener('click', () => {
+      this.restoreOriginalText();
     });
 
     this.elements.authButton.addEventListener('click', () => {
@@ -439,6 +444,8 @@ class PopupController {
     this.elements.translateButton.textContent = 'Translate Page';
     this.elements.translateSelectionButton.disabled = false;
     this.elements.translateSelectionButton.textContent = 'Translate Selection';
+    this.elements.nllbTranslateButton.disabled = false;
+    this.elements.nllbTranslateButton.textContent = 'Translate (Cloud)';
     this.hideProgress();
     
     const sourceName = this.getLanguageName(sourceLanguage);
@@ -452,6 +459,8 @@ class PopupController {
     this.elements.translateButton.textContent = 'Translate Page';
     this.elements.translateSelectionButton.disabled = false;
     this.elements.translateSelectionButton.textContent = 'Translate Selection';
+    this.elements.nllbTranslateButton.disabled = false;
+    this.elements.nllbTranslateButton.textContent = 'Translate (Cloud)';
     this.hideProgress();
     this.showStatus('Translation failed: ' + error, 'error');
   }
@@ -605,10 +614,50 @@ class PopupController {
   async translateWithNLLB() {
     if (this.isTranslating) return;
 
-    const targetLanguage = this.elements.nllbTargetLanguage.value;
-    const targetName = NLLB_LANGUAGES.find(l => l.code === targetLanguage)?.name || targetLanguage;
+    const sourceCode = this.elements.sourceLanguage.value;
+    const targetCode = this.elements.nllbTargetLanguage.value;
+    const targetName = NLLB_LANGUAGES.find(l => l.code === targetCode)?.name || targetCode;
+    const sourceName = this.getLanguageName(sourceCode);
 
-    this.showStatus(`NLLB cloud translation to ${targetName} is going to be functional soon.`, 'info');
+    if (sourceName === targetName) {
+      this.showStatus('Source and target languages cannot be the same', 'error');
+      return;
+    }
+
+    this.isTranslating = true;
+    this.elements.nllbTranslateButton.disabled = true;
+    this.elements.nllbTranslateButton.textContent = 'Translating...';
+    this.showProgress();
+    this.showStatus(`Cloud translating: ${sourceName} → ${targetName}`, 'info');
+
+    try {
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      const tab = tabs[0];
+      if (!tab) throw new Error('No active tab found');
+
+      // Resolve auto-detect
+      let actualSourceName = sourceName;
+      if (sourceCode === 'auto') {
+        try {
+          const detectedLang = await chrome.tabs.sendMessage(tab.id, { action: 'detectLanguage' });
+          actualSourceName = this.getLanguageName(detectedLang || 'en');
+        } catch (error) {
+          actualSourceName = 'English';
+        }
+      }
+
+      await chrome.tabs.sendMessage(tab.id, {
+        action: 'translateNLLB',
+        sourceLang: actualSourceName,
+        targetLang: targetName,
+        apiBase: AUTH_BASE_URL,
+        addLangAttributes: this.elements.addLangAttributes.checked
+      });
+
+    } catch (error) {
+      console.error('NLLB translation error:', error);
+      this.onTranslationError(error.message);
+    }
   }
 
   getLanguageName(code) {

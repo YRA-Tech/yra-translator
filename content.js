@@ -83,6 +83,11 @@ class YRATranslator {
         case 'downloadLanguageModel':
           this.downloadLanguageModel(request.sourceLanguage, request.targetLanguage);
           break;
+        case 'translateNLLB':
+          if (!this.isInIframe) {
+            this.translatePageNLLB(request.sourceLang, request.targetLang, request.apiBase, request.addLangAttributes);
+          }
+          break;
       }
     });
   }
@@ -1246,6 +1251,211 @@ class YRATranslator {
       console.error('Error translating text node:', error);
     }
   }
+
+  // --- NLLB Cloud Translation Methods ---
+
+  async translatePageNLLB(sourceLang, targetLang, apiBase, addLangAttributes = true) {
+    if (this.isTranslating) return;
+
+    this.isTranslating = true;
+    this.addLangAttributes = addLangAttributes;
+    this.nllbApiBase = apiBase;
+
+    const languagePair = `nllb:${sourceLang}-${targetLang}`;
+
+    try {
+      if (this.currentLanguagePair && this.currentLanguagePair !== languagePair) {
+        this.restoreOriginalText();
+        this.textTranslationCache.clear();
+        this.translatedTexts.clear();
+      }
+
+      this.currentLanguagePair = languagePair;
+
+      // Destroy any local translator since we're using cloud
+      if (this.currentTranslator) {
+        this.currentTranslator.destroy();
+        this.currentTranslator = null;
+      }
+
+      const textNodes = this.getAllTextNodes();
+      const ariaNodes = this.getAllAriaNodes();
+
+      this.totalTextNodes = textNodes.length;
+      this.totalAriaNodes = ariaNodes.length;
+      this.completedTextNodes = 0;
+      this.completedAriaNodes = 0;
+
+      chrome.runtime.sendMessage({ action: 'translationProgress', progress: 0 });
+
+      // Translate text nodes
+      for (let i = 0; i < textNodes.length; i++) {
+        await this.translateTextNodeNLLB(textNodes[i], sourceLang, targetLang);
+
+        this.completedTextNodes = i + 1;
+        const textProgress = (this.completedTextNodes / this.totalTextNodes) * 80;
+        const ariaProgress = (this.completedAriaNodes / Math.max(this.totalAriaNodes, 1)) * 20;
+        chrome.runtime.sendMessage({
+          action: 'translationProgress',
+          progress: Math.round(textProgress + ariaProgress)
+        });
+      }
+
+      // Translate ARIA attributes
+      for (let i = 0; i < ariaNodes.length; i++) {
+        await this.translateAriaNodeNLLB(ariaNodes[i], sourceLang, targetLang);
+
+        this.completedAriaNodes = i + 1;
+        const textProgress = (this.completedTextNodes / Math.max(this.totalTextNodes, 1)) * 80;
+        const ariaProgress = (this.completedAriaNodes / this.totalAriaNodes) * 20;
+        chrome.runtime.sendMessage({
+          action: 'translationProgress',
+          progress: Math.round(textProgress + ariaProgress)
+        });
+      }
+
+      chrome.runtime.sendMessage({
+        action: 'translationComplete',
+        sourceLanguage: sourceLang,
+        targetLanguage: targetLang
+      });
+
+    } catch (error) {
+      console.error('NLLB translation error:', error);
+      chrome.runtime.sendMessage({
+        action: 'translationError',
+        error: error.message || 'Cloud translation failed'
+      });
+    } finally {
+      this.isTranslating = false;
+    }
+  }
+
+  async translateTextNodeNLLB(node, sourceLang, targetLang) {
+    const originalText = node.nodeValue.trim();
+    if (!originalText) return;
+
+    const nodeId = this.getNodeId(node);
+
+    if (!this.originalTexts.has(nodeId)) {
+      this.originalTexts.set(nodeId, originalText);
+    }
+
+    try {
+      let translatedText;
+      const cacheKey = `${this.currentLanguagePair}:${originalText}`;
+
+      if (this.textTranslationCache.has(cacheKey)) {
+        translatedText = this.textTranslationCache.get(cacheKey);
+      } else {
+        const jobId = await this.submitNLLBJob(originalText, sourceLang, targetLang);
+        translatedText = await this.pollNLLBJob(jobId);
+        this.textTranslationCache.set(cacheKey, translatedText);
+      }
+
+      this.translatedTexts.set(nodeId, translatedText);
+
+      // Apply to DOM — preserve whitespace (same logic as Gemini)
+      const fullNodeValue = node.nodeValue;
+      const trimmedValue = fullNodeValue.trim();
+
+      if (trimmedValue === originalText) {
+        const leadingWhitespace = fullNodeValue.match(/^\s*/)[0];
+        const trailingWhitespace = fullNodeValue.match(/\s*$/)[0];
+        node.nodeValue = leadingWhitespace + translatedText + trailingWhitespace;
+      } else {
+        node.nodeValue = fullNodeValue.replace(originalText, translatedText);
+      }
+
+      if (this.addLangAttributes && originalText !== translatedText) {
+        this.addLangAttributeToElement(node.parentNode, targetLang);
+      }
+    } catch (error) {
+      console.error('NLLB node translation error:', error.message);
+    }
+  }
+
+  async translateAriaNodeNLLB(ariaNode, sourceLang, targetLang) {
+    const { element, attribute, value } = ariaNode;
+    const originalText = value.trim();
+    if (!originalText) return;
+
+    const elementId = element.getAttribute('data-yra-id') || `yra-aria-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
+    element.setAttribute('data-yra-id', elementId);
+    const nodeId = `aria-${elementId}-${attribute}`;
+
+    if (!this.originalTexts.has(nodeId)) {
+      this.originalTexts.set(nodeId, originalText);
+    }
+
+    try {
+      let translatedText;
+      const cacheKey = `${this.currentLanguagePair}:${originalText}`;
+
+      if (this.textTranslationCache.has(cacheKey)) {
+        translatedText = this.textTranslationCache.get(cacheKey);
+      } else {
+        const jobId = await this.submitNLLBJob(originalText, sourceLang, targetLang);
+        translatedText = await this.pollNLLBJob(jobId);
+        this.textTranslationCache.set(cacheKey, translatedText);
+      }
+
+      element.setAttribute(attribute, translatedText);
+    } catch (error) {
+      console.error('NLLB ARIA translation error:', error.message);
+    }
+  }
+
+  async submitNLLBJob(text, sourceLang, targetLang) {
+    const res = await fetch(this.nllbApiBase + '/api/videos/translate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        text,
+        source_language: sourceLang,
+        target_language: targetLang
+      })
+    });
+
+    if (res.status === 401) throw new Error('Session expired. Please sign in again.');
+    if (!res.ok) throw new Error(`Translation request failed (${res.status})`);
+
+    const data = await res.json();
+    return data.job_id;
+  }
+
+  async pollNLLBJob(jobId, timeout = 60000) {
+    const startTime = Date.now();
+    let interval = 500;
+
+    while (Date.now() - startTime < timeout) {
+      const res = await fetch(this.nllbApiBase + '/api/jobs/' + jobId, {
+        credentials: 'include'
+      });
+
+      if (!res.ok) throw new Error(`Job status check failed (${res.status})`);
+
+      const data = await res.json();
+
+      if (data.status === 'completed') {
+        // Adjust this line when result_payload format is confirmed
+        const payload = data.result_payload;
+        return payload?.translated_text || payload?.text || JSON.stringify(payload);
+      }
+
+      if (data.status === 'failed') {
+        throw new Error(data.error_message || 'Translation job failed');
+      }
+
+      await new Promise(resolve => setTimeout(resolve, interval));
+      interval = Math.min(interval * 1.5, 3000);
+    }
+
+    throw new Error('Translation timed out. The server may be busy — please try again.');
+  }
+
+  // --- End NLLB Cloud Translation Methods ---
 
   async translateAriaAttributes(ariaNodes) {
     // Process attributes one by one synchronously to prevent API corruption
