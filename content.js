@@ -1288,30 +1288,34 @@ class YRATranslator {
 
       chrome.runtime.sendMessage({ action: 'translationProgress', progress: 0 });
 
-      // Translate text nodes
-      for (let i = 0; i < textNodes.length; i++) {
-        await this.translateTextNodeNLLB(textNodes[i], sourceLang, targetLang);
+      // 1) Collect the unique, not-yet-cached strings across text + ARIA nodes.
+      //    Dedup means repeated UI strings ("Home", "Search") translate once.
+      const uncached = new Set();
+      const collect = (raw) => {
+        const text = (raw || '').trim();
+        if (!text) return;
+        const cacheKey = `${this.currentLanguagePair}:${text}`;
+        if (!this.textTranslationCache.has(cacheKey)) uncached.add(text);
+      };
+      for (const node of textNodes) collect(node.nodeValue);
+      for (const aria of ariaNodes) collect(aria.value);
 
-        this.completedTextNodes = i + 1;
-        const textProgress = (this.completedTextNodes / this.totalTextNodes) * 80;
-        const ariaProgress = (this.completedAriaNodes / Math.max(this.totalAriaNodes, 1)) * 20;
-        chrome.runtime.sendMessage({
-          action: 'translationProgress',
-          progress: Math.round(textProgress + ariaProgress)
-        });
+      // 2) Translate the unique strings in batches, filling textTranslationCache.
+      const uniqueTexts = Array.from(uncached);
+      if (uniqueTexts.length > 0) {
+        await this.translateBatchNLLB(uniqueTexts, sourceLang, targetLang);
       }
 
-      // Translate ARIA attributes
+      // 3) Apply cached translations to the DOM (no network here).
+      for (let i = 0; i < textNodes.length; i++) {
+        this.applyTextNodeNLLB(textNodes[i], targetLang);
+        this.completedTextNodes = i + 1;
+        this.reportNLLBProgress();
+      }
       for (let i = 0; i < ariaNodes.length; i++) {
-        await this.translateAriaNodeNLLB(ariaNodes[i], sourceLang, targetLang);
-
+        this.applyAriaNodeNLLB(ariaNodes[i]);
         this.completedAriaNodes = i + 1;
-        const textProgress = (this.completedTextNodes / Math.max(this.totalTextNodes, 1)) * 80;
-        const ariaProgress = (this.completedAriaNodes / this.totalAriaNodes) * 20;
-        chrome.runtime.sendMessage({
-          action: 'translationProgress',
-          progress: Math.round(textProgress + ariaProgress)
-        });
+        this.reportNLLBProgress();
       }
 
       chrome.runtime.sendMessage({
@@ -1331,51 +1335,49 @@ class YRATranslator {
     }
   }
 
-  async translateTextNodeNLLB(node, sourceLang, targetLang) {
+  // DOM apply takes 40% of the bar; the first 60% is the batch network phase.
+  reportNLLBProgress() {
+    const textProgress = (this.completedTextNodes / Math.max(this.totalTextNodes, 1)) * 32;
+    const ariaProgress = (this.completedAriaNodes / Math.max(this.totalAriaNodes, 1)) * 8;
+    chrome.runtime.sendMessage({
+      action: 'translationProgress',
+      progress: Math.round(60 + textProgress + ariaProgress)
+    });
+  }
+
+  applyTextNodeNLLB(node, targetLang) {
     const originalText = node.nodeValue.trim();
     if (!originalText) return;
 
     const nodeId = this.getNodeId(node);
-
     if (!this.originalTexts.has(nodeId)) {
       this.originalTexts.set(nodeId, originalText);
     }
 
-    try {
-      let translatedText;
-      const cacheKey = `${this.currentLanguagePair}:${originalText}`;
+    const cacheKey = `${this.currentLanguagePair}:${originalText}`;
+    const translatedText = this.textTranslationCache.get(cacheKey);
+    if (translatedText === undefined) return; // not translated (e.g. failed batch)
 
-      if (this.textTranslationCache.has(cacheKey)) {
-        translatedText = this.textTranslationCache.get(cacheKey);
-      } else {
-        const jobId = await this.submitNLLBJob(originalText, sourceLang, targetLang);
-        translatedText = await this.pollNLLBJob(jobId);
-        this.textTranslationCache.set(cacheKey, translatedText);
-      }
+    this.translatedTexts.set(nodeId, translatedText);
 
-      this.translatedTexts.set(nodeId, translatedText);
+    // Apply to DOM — preserve whitespace (same logic as Gemini)
+    const fullNodeValue = node.nodeValue;
+    const trimmedValue = fullNodeValue.trim();
 
-      // Apply to DOM — preserve whitespace (same logic as Gemini)
-      const fullNodeValue = node.nodeValue;
-      const trimmedValue = fullNodeValue.trim();
+    if (trimmedValue === originalText) {
+      const leadingWhitespace = fullNodeValue.match(/^\s*/)[0];
+      const trailingWhitespace = fullNodeValue.match(/\s*$/)[0];
+      node.nodeValue = leadingWhitespace + translatedText + trailingWhitespace;
+    } else {
+      node.nodeValue = fullNodeValue.replace(originalText, translatedText);
+    }
 
-      if (trimmedValue === originalText) {
-        const leadingWhitespace = fullNodeValue.match(/^\s*/)[0];
-        const trailingWhitespace = fullNodeValue.match(/\s*$/)[0];
-        node.nodeValue = leadingWhitespace + translatedText + trailingWhitespace;
-      } else {
-        node.nodeValue = fullNodeValue.replace(originalText, translatedText);
-      }
-
-      if (this.addLangAttributes && originalText !== translatedText) {
-        this.addLangAttributeToElement(node.parentNode, targetLang);
-      }
-    } catch (error) {
-      console.error('NLLB node translation error:', error.message);
+    if (this.addLangAttributes && originalText !== translatedText) {
+      this.addLangAttributeToElement(node.parentNode, targetLang);
     }
   }
 
-  async translateAriaNodeNLLB(ariaNode, sourceLang, targetLang) {
+  applyAriaNodeNLLB(ariaNode) {
     const { element, attribute, value } = ariaNode;
     const originalText = value.trim();
     if (!originalText) return;
@@ -1388,31 +1390,46 @@ class YRATranslator {
       this.originalTexts.set(nodeId, originalText);
     }
 
-    try {
-      let translatedText;
-      const cacheKey = `${this.currentLanguagePair}:${originalText}`;
+    const cacheKey = `${this.currentLanguagePair}:${originalText}`;
+    const translatedText = this.textTranslationCache.get(cacheKey);
+    if (translatedText === undefined) return;
 
-      if (this.textTranslationCache.has(cacheKey)) {
-        translatedText = this.textTranslationCache.get(cacheKey);
-      } else {
-        const jobId = await this.submitNLLBJob(originalText, sourceLang, targetLang);
-        translatedText = await this.pollNLLBJob(jobId);
-        this.textTranslationCache.set(cacheKey, translatedText);
+    element.setAttribute(attribute, translatedText);
+  }
+
+  // Translate an array of unique strings, chunked to the server's batch limit,
+  // storing each result in textTranslationCache keyed by the language pair.
+  async translateBatchNLLB(uniqueTexts, sourceLang, targetLang) {
+    const MAX_BATCH = 200; // must stay <= server MAX_BATCH_SIZE
+    for (let i = 0; i < uniqueTexts.length; i += MAX_BATCH) {
+      const chunk = uniqueTexts.slice(i, i + MAX_BATCH);
+      const jobId = await this.submitNLLBBatch(chunk, sourceLang, targetLang);
+      const translations = await this.pollNLLBBatch(jobId);
+
+      if (!Array.isArray(translations) || translations.length !== chunk.length) {
+        throw new Error('Translation response size mismatch');
       }
 
-      element.setAttribute(attribute, translatedText);
-    } catch (error) {
-      console.error('NLLB ARIA translation error:', error.message);
+      chunk.forEach((text, idx) => {
+        this.textTranslationCache.set(`${this.currentLanguagePair}:${text}`, translations[idx]);
+      });
+
+      // Network phase fills the first 60% of the progress bar.
+      const done = Math.min(i + chunk.length, uniqueTexts.length);
+      chrome.runtime.sendMessage({
+        action: 'translationProgress',
+        progress: Math.round((done / uniqueTexts.length) * 60)
+      });
     }
   }
 
-  async submitNLLBJob(text, sourceLang, targetLang) {
-    const res = await fetch(this.nllbApiBase + '/api/videos/translate', {
+  async submitNLLBBatch(texts, sourceLang, targetLang) {
+    const res = await fetch(this.nllbApiBase + '/api/translate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
       body: JSON.stringify({
-        text,
+        texts,
         source_language: sourceLang,
         target_language: targetLang
       })
@@ -1425,7 +1442,7 @@ class YRATranslator {
     return data.job_id;
   }
 
-  async pollNLLBJob(jobId, timeout = 60000) {
+  async pollNLLBBatch(jobId, timeout = 120000) {
     const startTime = Date.now();
     let interval = 500;
 
@@ -1439,9 +1456,7 @@ class YRATranslator {
       const data = await res.json();
 
       if (data.status === 'completed') {
-        // Adjust this line when result_payload format is confirmed
-        const payload = data.result_payload;
-        return payload?.translated_text || payload?.text || JSON.stringify(payload);
+        return data.result_payload?.translated_texts || [];
       }
 
       if (data.status === 'failed') {

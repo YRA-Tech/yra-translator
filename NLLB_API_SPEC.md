@@ -1,188 +1,111 @@
-# NLLB Translation API Specification
+# NLLB Translation API — Async Batched Contract
 
-> **For:** Backend team at YRA Tech
 > **Consumer:** YRA Translator Chrome Extension
+> **Provider:** yra-monitor (`/api/translate`) → pool worker (yra-translation-service)
 > **Base URL:** `https://stage.yratech.com` (staging) / `https://yratech.com` (production)
 
----
-
-## Endpoint
-
-```
-POST /api/translate/nllb
-Content-Type: application/json
-```
-
-## Authentication
-
-Uses the **existing NextAuth.js session cookie** (`next-auth.session-token`).
-
-The Chrome extension already authenticates users via `POST /api/auth/callback/credentials` and sends cookies with `credentials: 'include'` on all requests. No additional auth mechanism is needed — just protect this endpoint with the same session middleware used by `/api/auth/session`.
-
-If the session is missing or expired, return `401`.
+This documents the **implemented** flow. Translation is **asynchronous and
+batched**: the extension submits all of a page's text in one job, then polls
+for the result. There is no synchronous endpoint.
 
 ---
 
-## Request
+## Flow overview
 
-```json
-{
-  "texts": [
-    "Hello, how are you?",
-    "Welcome to our website",
-    "Click here to continue"
-  ],
-  "sourceLang": "eng_Latn",
-  "targetLang": "fra_Latn"
-}
 ```
-
-| Field        | Type       | Required | Description                                      |
-|-------------|------------|----------|--------------------------------------------------|
-| `texts`     | `string[]` | Yes      | Array of text strings to translate                |
-| `sourceLang`| `string`   | Yes      | NLLB-200 source language code (e.g., `eng_Latn`) |
-| `targetLang`| `string`   | Yes      | NLLB-200 target language code (e.g., `fra_Latn`) |
-
-### Language codes
-
-Use NLLB-200 BCP-style codes. The full list used by the extension is in [`nllb-languages.js`](./nllb-languages.js). Examples:
-
-| Code         | Language              |
-|-------------|-----------------------|
-| `eng_Latn`  | English               |
-| `fra_Latn`  | French                |
-| `spa_Latn`  | Spanish               |
-| `deu_Latn`  | German                |
-| `arb_Arab`  | Arabic (Modern Std)   |
-| `zho_Hans`  | Chinese (Simplified)  |
-| `jpn_Jpan`  | Japanese              |
-| `hin_Deva`  | Hindi                 |
-| `kor_Hang`  | Korean                |
-| `rus_Cyrl`  | Russian               |
-
----
-
-## Response (Success — 200)
-
-```json
-{
-  "translations": [
-    "Bonjour, comment allez-vous?",
-    "Bienvenue sur notre site web",
-    "Cliquez ici pour continuer"
-  ]
-}
-```
-
-| Field           | Type       | Description                                          |
-|----------------|------------|------------------------------------------------------|
-| `translations` | `string[]` | Translated texts, same order and length as `texts`   |
-
-**Important:** The `translations` array **must** have the same length as the input `texts` array, with a 1:1 positional mapping.
-
----
-
-## Error Responses
-
-### 401 Unauthorized
-
-```json
-{
-  "error": "Unauthorized",
-  "message": "Please sign in to use cloud translation"
-}
-```
-
-### 400 Bad Request
-
-```json
-{
-  "error": "Bad Request",
-  "message": "Missing required field: texts"
-}
-```
-
-Other 400 cases:
-- `texts` is empty or not an array
-- `sourceLang` or `targetLang` is missing or not a valid NLLB code
-- `sourceLang` equals `targetLang`
-
-### 413 Payload Too Large
-
-```json
-{
-  "error": "Payload Too Large",
-  "message": "Batch size exceeds maximum of {MAX_BATCH_SIZE} texts"
-}
-```
-
-### 429 Too Many Requests
-
-```json
-{
-  "error": "Too Many Requests",
-  "message": "Rate limit exceeded. Try again in {retryAfterSeconds} seconds",
-  "retryAfter": 30
-}
-```
-
-### 500 Internal Server Error
-
-```json
-{
-  "error": "Internal Server Error",
-  "message": "Translation failed"
-}
+Extension                         yra-monitor                 pool worker (yra-translation-service)
+   │                                  │                                  │
+   ├─ POST /api/translate ───────────▶│  create `translate` job          │
+   │   {texts[], source_language,…}   │  status=pending                  │
+   │◀─ 202 {job_id} ──────────────────┤                                  │
+   │                                  │◀── POST /api/pool-worker/claim ───┤  job_types:["translate"]
+   │                                  │    job_payload ──────────────────▶│  translate each text
+   │                                  │◀── POST /api/jobs/{id}/complete ──┤  {translated_texts[]}
+   ├─ GET /api/jobs/{job_id} ────────▶│  status, result_payload          │
+   │◀─ {status:"completed",           │                                  │
+   │     result_payload:{translated_texts[]}}                            │
 ```
 
 ---
 
-## Example curl
+## 1. Submit — `POST /api/translate`
 
-```bash
-# 1. Get CSRF token + session cookie
-CSRF=$(curl -s -c cookies.txt https://stage.yratech.com/api/auth/csrf | jq -r '.csrfToken')
+**Auth:** NextAuth session cookie (`credentials: 'include'`). `401` if missing/expired.
 
-# 2. Login
-curl -s -b cookies.txt -c cookies.txt \
-  -X POST https://stage.yratech.com/api/auth/callback/credentials \
-  -d "email=mh@yrtech.com&password=FastFood321&csrfToken=$CSRF&callbackUrl=https://stage.yratech.com/auth/signin" \
-  -L
+### Request
 
-# 3. Translate
-curl -s -b cookies.txt \
-  -X POST https://stage.yratech.com/api/translate/nllb \
-  -H "Content-Type: application/json" \
-  -d '{
-    "texts": ["Hello world", "How are you?"],
-    "sourceLang": "eng_Latn",
-    "targetLang": "fra_Latn"
-  }'
+```json
+{
+  "texts": ["Hello, how are you?", "Welcome", "Click here"],
+  "source_language": "eng_Latn",
+  "target_language": "fra_Latn",
+  "model": "nllb-200-distilled-600M"
+}
+```
+
+| Field             | Type       | Required | Notes                                                        |
+|-------------------|------------|----------|--------------------------------------------------------------|
+| `texts`           | `string[]` | Yes      | Non-empty. Max **200** per request (`413` if exceeded).      |
+| `source_language` | `string`   | Yes      | NLLB code (`eng_Latn`) — see [`nllb-languages.js`](./nllb-languages.js). |
+| `target_language` | `string`   | Yes      | NLLB code. Must differ from source (`400` otherwise).        |
+| `model`           | `string`   | No       | Backend id; defaults to the service's `DEFAULT_TRANSLATION_MODEL` (NLLB-200). |
+
+> The extension deduplicates strings before sending and chunks to ≤200 per job,
+> so a page becomes a handful of jobs rather than one per text node.
+
+### Response — `202 Accepted`
+
+```json
+{ "job_id": "uuid", "status": "pending", "message": "Translation job queued" }
 ```
 
 ---
 
-## Questions for Backend Team
+## 2. Poll — `GET /api/jobs/{job_id}`
 
-Please confirm or decide on these before implementation:
+**Auth:** NextAuth session cookie. Returns `403` if the job isn't the caller's.
 
-| Question | Suggested Default | Notes |
-|----------|------------------|-------|
-| **Max batch size** (number of texts per request) | 100 | The extension sends all visible text nodes on a page. Average page has 50-200 nodes. |
-| **Max text length** per individual string | 5000 chars | Most text nodes are short (sentences, headings), but some may be paragraphs. |
-| **Rate limit** | 10 req/min per user | Typical usage: 1-2 translation requests per page load. |
-| **Timeout** | 30 seconds | For large batches. The extension will show a progress indicator. |
-| **Source language auto-detect** | Support `"auto"` as `sourceLang` value? | The extension can detect page language client-side, but server-side detection would be more reliable for NLLB. |
-| **Streaming** | Not required initially | Could add SSE/streaming later for large pages to show incremental progress. |
+### Response — completed
+
+```json
+{
+  "job_id": "uuid",
+  "job_type": "translate",
+  "status": "completed",
+  "result_payload": {
+    "translated_texts": ["Bonjour, comment allez-vous?", "Bienvenue", "Cliquez ici"],
+    "model_used": "nllb-200-distilled-600M"
+  },
+  "error_message": null
+}
+```
+
+- `status` is one of `pending` | `running` | `completed` | `failed`.
+- **`result_payload.translated_texts` is positional 1:1 with the request `texts`** and has the same length.
+- On `failed`, read `error_message`.
+
+The extension polls with exponential backoff (500 ms → 3 s) up to a 120 s timeout per job.
 
 ---
 
-## How the Extension Will Use This
+## Error responses
 
-1. User clicks **"Translate (Cloud)"** in the popup
-2. Extension extracts all visible text nodes from the page (already implemented in `content.js`)
-3. Extension sends `POST /api/translate/nllb` with the batch of texts
-4. Extension receives translations and replaces DOM text nodes (already implemented in `content.js`)
-5. User can click **"Restore"** to revert (already implemented)
+| Status | When |
+|--------|------|
+| `400`  | `texts` missing/empty/not an array, non-string items, missing langs, or `source_language === target_language` |
+| `401`  | No/expired session |
+| `403`  | Polling a job that belongs to another user |
+| `413`  | `texts` length exceeds the max batch size (200) |
+| `500`  | Job creation failed |
 
-The extension already handles: text extraction, DOM replacement, progress UI, error display, and auth cookies. Once this endpoint exists, wiring it up is straightforward.
+Error body shape: `{ "error": "<message>" }`.
+
+---
+
+## Notes for future work
+
+- **Synchronous endpoint:** not implemented and not planned for now. If added
+  later it would be a separate route (e.g. `POST /api/translate/sync`) and
+  likely limited to cloud API backends (Azure/DeepL/DeepSeek) that return fast.
+- **Server batch limit** lives in `yra-monitor/app/api/translate/route.ts`
+  (`MAX_BATCH_SIZE`). Keep the extension's `MAX_BATCH` in `content.js` ≤ that.
