@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "YRA Translator",
   "version": "0.2.0",
-  "description": "Full-page text translation using Chrome's new Translation APIs",
+  "description": "Full-page translation via Chrome's on-device API or cloud NLLB-200 (200+ languages)",
   "permissions": [
     "activeTab",
     "storage",
