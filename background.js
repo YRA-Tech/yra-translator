@@ -42,12 +42,36 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 // yratech.com is blocked by CORS. The background service worker DOES get
 // cross-origin access via host_permissions, so content.js routes its
 // /api/translate and /api/jobs requests through here.
+//
+// This proxy attaches the user's yratech.com session cookies
+// (credentials: 'include'), so it must NOT become a confused-deputy / SSRF
+// relay: every request is restricted to the YRA API origins, the two
+// translation endpoints, and GET/POST only.
+const YRA_API_ORIGINS = new Set([
+  'https://yratech.com',
+  'https://stage.yratech.com'
+]);
+
+function isAllowedApiRequest(rawUrl, method) {
+  let url;
+  try { url = new URL(rawUrl); } catch { return false; }
+  if (!YRA_API_ORIGINS.has(url.origin)) return false;
+  if (method !== 'GET' && method !== 'POST') return false;
+  return url.pathname === '/api/translate' || url.pathname.startsWith('/api/jobs/');
+}
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action !== 'nllbApiRequest') return;
 
   (async () => {
     try {
-      const options = { method: request.method || 'GET', credentials: 'include' };
+      const method = (request.method || 'GET').toUpperCase();
+      if (!isAllowedApiRequest(request.url, method)) {
+        sendResponse({ ok: false, status: 0, error: 'Blocked: request not allowed' });
+        return;
+      }
+
+      const options = { method, credentials: 'include' };
       if (request.body !== undefined && request.body !== null) {
         options.headers = { 'Content-Type': 'application/json' };
         options.body = JSON.stringify(request.body);
