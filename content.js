@@ -83,6 +83,11 @@ class YRATranslator {
         case 'downloadLanguageModel':
           this.downloadLanguageModel(request.sourceLanguage, request.targetLanguage);
           break;
+        case 'translateNLLB':
+          if (!this.isInIframe) {
+            this.translatePageNLLB(request.sourceLang, request.targetLang, request.apiBase, request.addLangAttributes);
+          }
+          break;
       }
     });
   }
@@ -1246,6 +1251,226 @@ class YRATranslator {
       console.error('Error translating text node:', error);
     }
   }
+
+  // --- NLLB Cloud Translation Methods ---
+
+  async translatePageNLLB(sourceLang, targetLang, apiBase, addLangAttributes = true) {
+    if (this.isTranslating) return;
+
+    this.isTranslating = true;
+    this.addLangAttributes = addLangAttributes;
+    this.nllbApiBase = apiBase;
+
+    const languagePair = `nllb:${sourceLang}-${targetLang}`;
+
+    try {
+      if (this.currentLanguagePair && this.currentLanguagePair !== languagePair) {
+        this.restoreOriginalText();
+        this.textTranslationCache.clear();
+        this.translatedTexts.clear();
+      }
+
+      this.currentLanguagePair = languagePair;
+
+      // Destroy any local translator since we're using cloud
+      if (this.currentTranslator) {
+        this.currentTranslator.destroy();
+        this.currentTranslator = null;
+      }
+
+      const textNodes = this.getAllTextNodes();
+      const ariaNodes = this.getAllAriaNodes();
+
+      this.totalTextNodes = textNodes.length;
+      this.totalAriaNodes = ariaNodes.length;
+      this.completedTextNodes = 0;
+      this.completedAriaNodes = 0;
+
+      chrome.runtime.sendMessage({ action: 'translationProgress', progress: 0 });
+
+      // 1) Collect the unique, not-yet-cached strings across text + ARIA nodes.
+      //    Dedup means repeated UI strings ("Home", "Search") translate once.
+      const uncached = new Set();
+      const collect = (raw) => {
+        const text = (raw || '').trim();
+        if (!text) return;
+        const cacheKey = `${this.currentLanguagePair}:${text}`;
+        if (!this.textTranslationCache.has(cacheKey)) uncached.add(text);
+      };
+      for (const node of textNodes) collect(node.nodeValue);
+      for (const aria of ariaNodes) collect(aria.value);
+
+      // 2) Translate the unique strings in batches, filling textTranslationCache.
+      const uniqueTexts = Array.from(uncached);
+      if (uniqueTexts.length > 0) {
+        await this.translateBatchNLLB(uniqueTexts, sourceLang, targetLang);
+      }
+
+      // 3) Apply cached translations to the DOM (no network here).
+      for (let i = 0; i < textNodes.length; i++) {
+        this.applyTextNodeNLLB(textNodes[i], targetLang);
+        this.completedTextNodes = i + 1;
+        this.reportNLLBProgress();
+      }
+      for (let i = 0; i < ariaNodes.length; i++) {
+        this.applyAriaNodeNLLB(ariaNodes[i]);
+        this.completedAriaNodes = i + 1;
+        this.reportNLLBProgress();
+      }
+
+      chrome.runtime.sendMessage({
+        action: 'translationComplete',
+        sourceLanguage: sourceLang,
+        targetLanguage: targetLang
+      });
+
+    } catch (error) {
+      console.error('NLLB translation error:', error);
+      chrome.runtime.sendMessage({
+        action: 'translationError',
+        error: error.message || 'Cloud translation failed'
+      });
+    } finally {
+      this.isTranslating = false;
+    }
+  }
+
+  // DOM apply takes 40% of the bar; the first 60% is the batch network phase.
+  reportNLLBProgress() {
+    const textProgress = (this.completedTextNodes / Math.max(this.totalTextNodes, 1)) * 32;
+    const ariaProgress = (this.completedAriaNodes / Math.max(this.totalAriaNodes, 1)) * 8;
+    chrome.runtime.sendMessage({
+      action: 'translationProgress',
+      progress: Math.round(60 + textProgress + ariaProgress)
+    });
+  }
+
+  applyTextNodeNLLB(node, targetLang) {
+    const originalText = node.nodeValue.trim();
+    if (!originalText) return;
+
+    const nodeId = this.getNodeId(node);
+    if (!this.originalTexts.has(nodeId)) {
+      this.originalTexts.set(nodeId, originalText);
+    }
+
+    const cacheKey = `${this.currentLanguagePair}:${originalText}`;
+    const translatedText = this.textTranslationCache.get(cacheKey);
+    if (translatedText === undefined) return; // not translated (e.g. failed batch)
+
+    this.translatedTexts.set(nodeId, translatedText);
+
+    // Apply to DOM — preserve whitespace (same logic as Gemini)
+    const fullNodeValue = node.nodeValue;
+    const trimmedValue = fullNodeValue.trim();
+
+    if (trimmedValue === originalText) {
+      const leadingWhitespace = fullNodeValue.match(/^\s*/)[0];
+      const trailingWhitespace = fullNodeValue.match(/\s*$/)[0];
+      node.nodeValue = leadingWhitespace + translatedText + trailingWhitespace;
+    } else {
+      node.nodeValue = fullNodeValue.replace(originalText, translatedText);
+    }
+
+    if (this.addLangAttributes && originalText !== translatedText) {
+      this.addLangAttributeToElement(node.parentNode, targetLang);
+    }
+  }
+
+  applyAriaNodeNLLB(ariaNode) {
+    const { element, attribute, value } = ariaNode;
+    const originalText = value.trim();
+    if (!originalText) return;
+
+    const elementId = element.getAttribute('data-yra-id') || `yra-aria-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
+    element.setAttribute('data-yra-id', elementId);
+    const nodeId = `aria-${elementId}-${attribute}`;
+
+    if (!this.originalTexts.has(nodeId)) {
+      this.originalTexts.set(nodeId, originalText);
+    }
+
+    const cacheKey = `${this.currentLanguagePair}:${originalText}`;
+    const translatedText = this.textTranslationCache.get(cacheKey);
+    if (translatedText === undefined) return;
+
+    element.setAttribute(attribute, translatedText);
+  }
+
+  // Translate an array of unique strings, chunked to the server's batch limit,
+  // storing each result in textTranslationCache keyed by the language pair.
+  async translateBatchNLLB(uniqueTexts, sourceLang, targetLang) {
+    const MAX_BATCH = 200; // must stay <= server MAX_BATCH_SIZE
+    for (let i = 0; i < uniqueTexts.length; i += MAX_BATCH) {
+      const chunk = uniqueTexts.slice(i, i + MAX_BATCH);
+      const jobId = await this.submitNLLBBatch(chunk, sourceLang, targetLang);
+      const translations = await this.pollNLLBBatch(jobId);
+
+      if (!Array.isArray(translations) || translations.length !== chunk.length) {
+        throw new Error('Translation response size mismatch');
+      }
+
+      chunk.forEach((text, idx) => {
+        this.textTranslationCache.set(`${this.currentLanguagePair}:${text}`, translations[idx]);
+      });
+
+      // Network phase fills the first 60% of the progress bar.
+      const done = Math.min(i + chunk.length, uniqueTexts.length);
+      chrome.runtime.sendMessage({
+        action: 'translationProgress',
+        progress: Math.round((done / uniqueTexts.length) * 60)
+      });
+    }
+  }
+
+  async submitNLLBBatch(texts, sourceLang, targetLang) {
+    const res = await fetch(this.nllbApiBase + '/api/translate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        texts,
+        source_language: sourceLang,
+        target_language: targetLang
+      })
+    });
+
+    if (res.status === 401) throw new Error('Session expired. Please sign in again.');
+    if (!res.ok) throw new Error(`Translation request failed (${res.status})`);
+
+    const data = await res.json();
+    return data.job_id;
+  }
+
+  async pollNLLBBatch(jobId, timeout = 120000) {
+    const startTime = Date.now();
+    let interval = 500;
+
+    while (Date.now() - startTime < timeout) {
+      const res = await fetch(this.nllbApiBase + '/api/jobs/' + jobId, {
+        credentials: 'include'
+      });
+
+      if (!res.ok) throw new Error(`Job status check failed (${res.status})`);
+
+      const data = await res.json();
+
+      if (data.status === 'completed') {
+        return data.result_payload?.translated_texts || [];
+      }
+
+      if (data.status === 'failed') {
+        throw new Error(data.error_message || 'Translation job failed');
+      }
+
+      await new Promise(resolve => setTimeout(resolve, interval));
+      interval = Math.min(interval * 1.5, 3000);
+    }
+
+    throw new Error('Translation timed out. The server may be busy — please try again.');
+  }
+
+  // --- End NLLB Cloud Translation Methods ---
 
   async translateAriaAttributes(ariaNodes) {
     // Process attributes one by one synchronously to prevent API corruption

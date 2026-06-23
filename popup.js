@@ -12,7 +12,21 @@ class PopupController {
       restoreButton: document.getElementById('restoreButton'),
       status: document.getElementById('status'),
       progress: document.getElementById('progress'),
-      progressBar: document.getElementById('progressBar')
+      progressBar: document.getElementById('progressBar'),
+      nllbSection: document.getElementById('nllbSection'),
+      nllbTargetLanguage: document.getElementById('nllbTargetLanguage'),
+      nllbTranslateButton: document.getElementById('nllbTranslateButton'),
+      nllbRestoreButton: document.getElementById('nllbRestoreButton'),
+      authBar: document.getElementById('authBar'),
+      authLabel: document.getElementById('authLabel'),
+      authButton: document.getElementById('authButton'),
+      loginForm: document.getElementById('loginForm'),
+      loginEmail: document.getElementById('loginEmail'),
+      loginPassword: document.getElementById('loginPassword'),
+      loginSubmit: document.getElementById('loginSubmit'),
+      loginError: document.getElementById('loginError'),
+      signupLink: document.getElementById('signupLink'),
+      translatorContent: document.getElementById('translatorContent')
     };
 
     console.log('POPUP: Elements loaded:', this.elements);
@@ -25,6 +39,7 @@ class PopupController {
     this.setupEventListeners();
     await this.checkAPIAvailability();
     await this.checkTextSelection();
+    await this.checkAuthAndShowNLLB();
   }
 
   setupEventListeners() {
@@ -54,6 +69,44 @@ class PopupController {
 
     this.elements.addLangAttributes.addEventListener('change', () => {
       this.saveSettings();
+    });
+
+    this.elements.nllbTranslateButton.addEventListener('click', () => {
+      this.translateWithNLLB();
+    });
+
+    this.elements.nllbTargetLanguage.addEventListener('change', () => {
+      this.saveSettings();
+    });
+
+    this.elements.nllbRestoreButton.addEventListener('click', () => {
+      this.restoreOriginalText();
+    });
+
+    this.elements.authButton.addEventListener('click', () => {
+      this.handleAuthToggle();
+    });
+
+    this.elements.loginSubmit.addEventListener('click', () => {
+      this.handleLoginSubmit();
+    });
+
+    this.elements.loginPassword.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') this.handleLoginSubmit();
+    });
+
+    this.elements.loginEmail.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') this.elements.loginPassword.focus();
+    });
+
+    this.elements.signupLink.addEventListener('click', (e) => {
+      e.preventDefault();
+      chrome.tabs.create({ url: AUTH_BASE_URL + '/auth/signup' });
+    });
+
+    onAuthStateChanged(async (isLoggedIn) => {
+      await this.updateAuthUI(isLoggedIn);
+      this.toggleNLLBSection(isLoggedIn);
     });
 
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -101,12 +154,14 @@ class PopupController {
       const settings = await chrome.storage.sync.get({
         sourceLanguage: 'auto',
         targetLanguage: 'en',
-        addLangAttributes: true
+        addLangAttributes: true,
+        nllbTargetLanguage: 'fra_Latn'
       });
 
       this.elements.sourceLanguage.value = settings.sourceLanguage;
       this.elements.targetLanguage.value = settings.targetLanguage;
       this.elements.addLangAttributes.checked = settings.addLangAttributes;
+      this.savedNLLBTarget = settings.nllbTargetLanguage;
     } catch (error) {
       console.error('Error loading settings:', error);
     }
@@ -117,7 +172,8 @@ class PopupController {
       await chrome.storage.sync.set({
         sourceLanguage: this.elements.sourceLanguage.value,
         targetLanguage: this.elements.targetLanguage.value,
-        addLangAttributes: this.elements.addLangAttributes.checked
+        addLangAttributes: this.elements.addLangAttributes.checked,
+        nllbTargetLanguage: this.elements.nllbTargetLanguage.value
       });
     } catch (error) {
       console.error('Error saving settings:', error);
@@ -388,6 +444,8 @@ class PopupController {
     this.elements.translateButton.textContent = 'Translate Page';
     this.elements.translateSelectionButton.disabled = false;
     this.elements.translateSelectionButton.textContent = 'Translate Selection';
+    this.elements.nllbTranslateButton.disabled = false;
+    this.elements.nllbTranslateButton.textContent = 'Translate (Cloud)';
     this.hideProgress();
     
     const sourceName = this.getLanguageName(sourceLanguage);
@@ -401,6 +459,8 @@ class PopupController {
     this.elements.translateButton.textContent = 'Translate Page';
     this.elements.translateSelectionButton.disabled = false;
     this.elements.translateSelectionButton.textContent = 'Translate Selection';
+    this.elements.nllbTranslateButton.disabled = false;
+    this.elements.nllbTranslateButton.textContent = 'Translate (Cloud)';
     this.hideProgress();
     this.showStatus('Translation failed: ' + error, 'error');
   }
@@ -433,6 +493,173 @@ class PopupController {
     this.elements.progress.setAttribute('aria-valuenow', progress);
   }
 
+  async checkAuthAndShowNLLB() {
+    const localLoggedIn = await isUserLoggedIn();
+
+    // Validate against server — handles expired sessions and existing cookies
+    try {
+      const serverUser = await getSession();
+      if (localLoggedIn && !serverUser) {
+        // Session expired — clear stale local state
+        await logout();
+        return;
+      }
+      if (!localLoggedIn && serverUser) {
+        // Existing cookies from prior session — sync to local
+        await chrome.storage.local.set({ yraAuthToken: true, yraUser: serverUser });
+        await this.updateAuthUI(true);
+        this.toggleNLLBSection(true);
+        return;
+      }
+    } catch (error) {
+      console.warn('Server session check failed, using local state:', error);
+    }
+
+    await this.updateAuthUI(localLoggedIn);
+    this.toggleNLLBSection(localLoggedIn);
+  }
+
+  async updateAuthUI(loggedIn) {
+    if (loggedIn) {
+      const user = await getStoredUser();
+      this.elements.authBar.className = 'auth-bar logged-in';
+      this.elements.authLabel.textContent = user?.name || user?.email || 'YRA Tech account connected';
+      this.elements.authButton.textContent = 'Sign Out';
+      this.hideLoginForm();
+    } else {
+      this.elements.authBar.className = 'auth-bar logged-out';
+      this.elements.authLabel.textContent = 'Sign in for 200+ languages';
+      this.elements.authButton.textContent = 'Sign In';
+    }
+  }
+
+  async handleAuthToggle() {
+    const loggedIn = await isUserLoggedIn();
+    if (loggedIn) {
+      await logout();
+    } else {
+      // Toggle login form visibility
+      const isHidden = this.elements.loginForm.classList.contains('hidden');
+      if (isHidden) {
+        this.elements.loginForm.classList.remove('hidden');
+        this.elements.translatorContent.classList.add('hidden');
+        this.elements.loginEmail.focus();
+      } else {
+        this.hideLoginForm();
+      }
+    }
+  }
+
+  async handleLoginSubmit() {
+    const email = this.elements.loginEmail.value.trim();
+    const password = this.elements.loginPassword.value;
+
+    if (!email || !password) {
+      this.elements.loginError.textContent = 'Please enter email and password';
+      this.elements.loginError.classList.remove('hidden');
+      return;
+    }
+
+    this.elements.loginSubmit.disabled = true;
+    this.elements.loginSubmit.textContent = 'Signing in...';
+    this.elements.loginError.classList.add('hidden');
+
+    try {
+      await login(email, password);
+      // onAuthStateChanged will handle UI updates
+      this.hideLoginForm();
+    } catch (error) {
+      this.elements.loginError.textContent = error.message;
+      this.elements.loginError.classList.remove('hidden');
+    } finally {
+      this.elements.loginSubmit.disabled = false;
+      this.elements.loginSubmit.textContent = 'Sign In';
+    }
+  }
+
+  hideLoginForm() {
+    this.elements.loginForm.classList.add('hidden');
+    this.elements.translatorContent.classList.remove('hidden');
+    this.elements.loginEmail.value = '';
+    this.elements.loginPassword.value = '';
+    this.elements.loginError.classList.add('hidden');
+  }
+
+  toggleNLLBSection(show) {
+    if (show) {
+      this.populateNLLBDropdown();
+      this.elements.nllbSection.classList.remove('hidden');
+    } else {
+      this.elements.nllbSection.classList.add('hidden');
+    }
+  }
+
+  populateNLLBDropdown() {
+    const select = this.elements.nllbTargetLanguage;
+    if (select.options.length > 1) return; // already populated
+
+    select.innerHTML = '';
+    for (const lang of NLLB_LANGUAGES) {
+      const option = document.createElement('option');
+      option.value = lang.code;
+      option.textContent = lang.name;
+      select.appendChild(option);
+    }
+
+    if (this.savedNLLBTarget) {
+      select.value = this.savedNLLBTarget;
+    }
+  }
+
+  async translateWithNLLB() {
+    if (this.isTranslating) return;
+
+    const sourceCode = this.elements.sourceLanguage.value;
+    const targetCode = this.elements.nllbTargetLanguage.value;
+    const targetName = NLLB_LANGUAGES.find(l => l.code === targetCode)?.name || targetCode;
+    const sourceName = this.getLanguageName(sourceCode);
+
+    if (sourceName === targetName) {
+      this.showStatus('Source and target languages cannot be the same', 'error');
+      return;
+    }
+
+    this.isTranslating = true;
+    this.elements.nllbTranslateButton.disabled = true;
+    this.elements.nllbTranslateButton.textContent = 'Translating...';
+    this.showProgress();
+    this.showStatus(`Cloud translating: ${sourceName} → ${targetName}`, 'info');
+
+    try {
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      const tab = tabs[0];
+      if (!tab) throw new Error('No active tab found');
+
+      // Resolve auto-detect
+      let actualSourceName = sourceName;
+      if (sourceCode === 'auto') {
+        try {
+          const detectedLang = await chrome.tabs.sendMessage(tab.id, { action: 'detectLanguage' });
+          actualSourceName = this.getLanguageName(detectedLang || 'en');
+        } catch (error) {
+          actualSourceName = 'English';
+        }
+      }
+
+      await chrome.tabs.sendMessage(tab.id, {
+        action: 'translateNLLB',
+        sourceLang: actualSourceName,
+        targetLang: targetName,
+        apiBase: AUTH_BASE_URL,
+        addLangAttributes: this.elements.addLangAttributes.checked
+      });
+
+    } catch (error) {
+      console.error('NLLB translation error:', error);
+      this.onTranslationError(error.message);
+    }
+  }
+
   getLanguageName(code) {
     const languages = {
       'en': 'English',
@@ -448,7 +675,9 @@ class PopupController {
       'ar': 'Arabic',
       'hi': 'Hindi'
     };
-    return languages[code] || code;
+    if (languages[code]) return languages[code];
+    const nllb = typeof NLLB_LANGUAGES !== 'undefined' && NLLB_LANGUAGES.find(l => l.code === code);
+    return nllb ? nllb.name : code;
   }
 
   showLanguageDownloadPrompt(sourceLanguage, targetLanguage) {
