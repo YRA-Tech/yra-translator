@@ -1423,23 +1423,32 @@ class YRATranslator {
     }
   }
 
+  // Route cloud-API calls through the background service worker. Content
+  // scripts can't make cross-origin requests to yratech.com directly under
+  // MV3 (no host_permissions, CORS-blocked); the worker can.
+  async nllbApiRequest(path, method, body) {
+    const res = await chrome.runtime.sendMessage({
+      action: 'nllbApiRequest',
+      url: this.nllbApiBase + path,
+      method,
+      body
+    });
+    if (!res) throw new Error('Translation request failed (no response from background worker)');
+    if (res.error) throw new Error(res.error);
+    return res; // { ok, status, data }
+  }
+
   async submitNLLBBatch(texts, sourceLang, targetLang) {
-    const res = await fetch(this.nllbApiBase + '/api/translate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({
-        texts,
-        source_language: sourceLang,
-        target_language: targetLang
-      })
+    const res = await this.nllbApiRequest('/api/translate', 'POST', {
+      texts,
+      source_language: sourceLang,
+      target_language: targetLang
     });
 
     if (res.status === 401) throw new Error('Session expired. Please sign in again.');
     if (!res.ok) throw new Error(`Translation request failed (${res.status})`);
 
-    const data = await res.json();
-    return data.job_id;
+    return res.data.job_id;
   }
 
   async pollNLLBBatch(jobId, timeout = 120000) {
@@ -1447,13 +1456,11 @@ class YRATranslator {
     let interval = 500;
 
     while (Date.now() - startTime < timeout) {
-      const res = await fetch(this.nllbApiBase + '/api/jobs/' + jobId, {
-        credentials: 'include'
-      });
+      const res = await this.nllbApiRequest('/api/jobs/' + jobId, 'GET', null);
 
       if (!res.ok) throw new Error(`Job status check failed (${res.status})`);
 
-      const data = await res.json();
+      const data = res.data;
 
       if (data.status === 'completed') {
         return data.result_payload?.translated_texts || [];
