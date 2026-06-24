@@ -1,3 +1,13 @@
+// Map the on-device source dropdown's ISO 639-1 codes to NLLB Flores-200
+// codes, so the cloud worker receives codes it can resolve directly (the
+// extension and worker use different display-name spellings, so names don't
+// match — codes are the reliable contract).
+const ISO_TO_NLLB = {
+  en: 'eng_Latn', es: 'spa_Latn', fr: 'fra_Latn', de: 'deu_Latn',
+  it: 'ita_Latn', pt: 'por_Latn', ru: 'rus_Cyrl', ja: 'jpn_Jpan',
+  ko: 'kor_Hang', zh: 'zho_Hans', ar: 'arb_Arab', hi: 'hin_Deva',
+};
+
 class PopupController {
   constructor() {
     console.log('POPUP: PopupController constructor called');
@@ -614,42 +624,42 @@ class PopupController {
   async translateWithNLLB() {
     if (this.isTranslating) return;
 
-    const sourceCode = this.elements.sourceLanguage.value;
-    const targetCode = this.elements.nllbTargetLanguage.value;
+    const sourceSel = this.elements.sourceLanguage.value;        // 'auto' | ISO 639-1
+    const targetCode = this.elements.nllbTargetLanguage.value;    // NLLB Flores code
     const targetName = NLLB_LANGUAGES.find(l => l.code === targetCode)?.name || targetCode;
-    const sourceName = this.getLanguageName(sourceCode);
-
-    if (sourceName === targetName) {
-      this.showStatus('Source and target languages cannot be the same', 'error');
-      return;
-    }
-
-    this.isTranslating = true;
-    this.elements.nllbTranslateButton.disabled = true;
-    this.elements.nllbTranslateButton.textContent = 'Translating...';
-    this.showProgress();
-    this.showStatus(`Cloud translating: ${sourceName} → ${targetName}`, 'info');
 
     try {
       const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
       const tab = tabs[0];
       if (!tab) throw new Error('No active tab found');
 
-      // Resolve auto-detect
-      let actualSourceName = sourceName;
-      if (sourceCode === 'auto') {
+      // Resolve auto-detect to an ISO code, then map ISO -> NLLB Flores code.
+      let sourceIso = sourceSel;
+      if (sourceSel === 'auto') {
         try {
           const detectedLang = await chrome.tabs.sendMessage(tab.id, { action: 'detectLanguage' });
-          actualSourceName = this.getLanguageName(detectedLang || 'en');
+          sourceIso = detectedLang || 'en';
         } catch (error) {
-          actualSourceName = 'English';
+          sourceIso = 'en';
         }
       }
+      const sourceCode = ISO_TO_NLLB[sourceIso] || 'eng_Latn';
+
+      if (sourceCode === targetCode) {
+        this.showStatus('Source and target languages cannot be the same', 'error');
+        return;
+      }
+
+      this.isTranslating = true;
+      this.elements.nllbTranslateButton.disabled = true;
+      this.elements.nllbTranslateButton.textContent = 'Translating...';
+      this.showProgress();
+      this.showStatus(`Cloud translating: ${this.getLanguageName(sourceIso)} → ${targetName}`, 'info');
 
       await chrome.tabs.sendMessage(tab.id, {
         action: 'translateNLLB',
-        sourceLang: actualSourceName,
-        targetLang: targetName,
+        sourceLang: sourceCode,   // NLLB Flores code, e.g. eng_Latn
+        targetLang: targetCode,   // NLLB Flores code, e.g. pbt_Arab
         apiBase: AUTH_BASE_URL,
         addLangAttributes: this.elements.addLangAttributes.checked
       });
