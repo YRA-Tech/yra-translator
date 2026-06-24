@@ -3,6 +3,55 @@ if (typeof window.YRATranslator !== 'undefined') {
   console.log('YRATranslator already exists, skipping initialization');
 } else {
 
+// NLLB Flores-200 codes are `{ISO 639-3}_{Script}` (e.g. pbt_Arab). The HTML
+// `lang` attribute wants BCP-47, so map the 639-3 primary subtag to ISO 639-1
+// where one exists (the canonical/shortest form), keep the script subtag, and
+// drop it when it's the language's default (Suppress-Script). Languages with no
+// 639-1 fall back to `{639-3}-{Script}`, which is still valid BCP-47.
+const NLLB_ISO3_TO_1 = {
+  eng:'en', spa:'es', fra:'fr', deu:'de', ita:'it', por:'pt', nld:'nl', swe:'sv',
+  dan:'da', nob:'nb', nno:'nn', fin:'fi', isl:'is', fao:'fo', ltz:'lb', afr:'af',
+  rus:'ru', ukr:'uk', bel:'be', bul:'bg', mkd:'mk', srp:'sr', hrv:'hr', bos:'bs',
+  slv:'sl', slk:'sk', ces:'cs', pol:'pl', ron:'ro', lit:'lt', lvs:'lv', est:'et',
+  hun:'hu', ell:'el', als:'sq', cat:'ca', glg:'gl', eus:'eu', oci:'oc', cym:'cy',
+  gle:'ga', gla:'gd', tur:'tr', azj:'az', uzn:'uz', kaz:'kk', kir:'ky', tat:'tt',
+  bak:'ba', tuk:'tk', tgk:'tg', khk:'mn', arb:'ar', pes:'fa', prs:'fa', urd:'ur',
+  snd:'sd', pbt:'ps', uig:'ug', heb:'he', ydd:'yi', hin:'hi', npi:'ne', mar:'mr',
+  san:'sa', guj:'gu', pan:'pa', ben:'bn', asm:'as', ory:'or', mal:'ml', tam:'ta',
+  tel:'te', kan:'kn', sin:'si', mya:'my', khm:'km', lao:'lo', tha:'th', bod:'bo',
+  dzo:'dz', jpn:'ja', kor:'ko', zho:'zh', ind:'id', zsm:'ms', jav:'jv', sun:'su',
+  tgl:'tl', vie:'vi', amh:'am', tir:'ti', som:'so', swh:'sw', hau:'ha', yor:'yo',
+  ibo:'ig', zul:'zu', xho:'xh', sna:'sn', nya:'ny', kin:'rw', run:'rn', lug:'lg',
+  lin:'ln', kon:'kg', wol:'wo', ewe:'ee', twi:'tw', bam:'bm', sag:'sg', fij:'fj',
+  smo:'sm', mri:'mi', plt:'mg', epo:'eo', kat:'ka', hye:'hy', gaz:'om', ssw:'ss',
+  tsn:'tn', tso:'ts', kas:'ks', grn:'gn', quy:'qu', ayr:'ay', hat:'ht', lim:'li',
+  sot:'st', srd:'sc',
+};
+
+// Default script per primary subtag — dropped from the tag when it matches.
+const NLLB_SUPPRESS_SCRIPT = {
+  en:'Latn', es:'Latn', fr:'Latn', de:'Latn', it:'Latn', pt:'Latn', nl:'Latn',
+  sv:'Latn', da:'Latn', nb:'Latn', nn:'Latn', fi:'Latn', is:'Latn', fo:'Latn',
+  lb:'Latn', af:'Latn', sq:'Latn', ca:'Latn', gl:'Latn', eu:'Latn', oc:'Latn',
+  cy:'Latn', ga:'Latn', gd:'Latn', tr:'Latn', az:'Latn', uz:'Latn', tk:'Latn',
+  id:'Latn', ms:'Latn', jv:'Latn', su:'Latn', tl:'Latn', vi:'Latn', so:'Latn',
+  sw:'Latn', ha:'Latn', yo:'Latn', ig:'Latn', zu:'Latn', xh:'Latn', sn:'Latn',
+  ny:'Latn', rw:'Latn', rn:'Latn', lg:'Latn', ln:'Latn', kg:'Latn', wo:'Latn',
+  ee:'Latn', tw:'Latn', bm:'Latn', sg:'Latn', fj:'Latn', sm:'Latn', mi:'Latn',
+  mg:'Latn', eo:'Latn', ht:'Latn', li:'Latn', ss:'Latn', tn:'Latn', ts:'Latn',
+  ay:'Latn', qu:'Latn', gn:'Latn', st:'Latn', sc:'Latn', lt:'Latn', lv:'Latn',
+  et:'Latn', hu:'Latn', ro:'Latn', pl:'Latn', cs:'Latn', sk:'Latn', sl:'Latn',
+  hr:'Latn', bs:'Latn',
+  ru:'Cyrl', uk:'Cyrl', be:'Cyrl', bg:'Cyrl', mk:'Cyrl', sr:'Cyrl', mn:'Cyrl',
+  kk:'Cyrl', ky:'Cyrl', tt:'Cyrl', ba:'Cyrl', tg:'Cyrl',
+  ar:'Arab', fa:'Arab', ur:'Arab', ps:'Arab', sd:'Arab', ug:'Arab',
+  hi:'Deva', ne:'Deva', mr:'Deva', sa:'Deva',
+  bn:'Beng', as:'Beng', am:'Ethi', ti:'Ethi', ja:'Jpan', ko:'Hang', th:'Thai',
+  he:'Hebr', yi:'Hebr', el:'Grek', ka:'Geor', hy:'Armn', gu:'Gujr', pa:'Guru',
+  ta:'Taml', te:'Telu', kn:'Knda', ml:'Mlym', or:'Orya', si:'Sinh', my:'Mymr',
+  km:'Khmr', lo:'Laoo', bo:'Tibt', dz:'Tibt',
+};
+
 class YRATranslator {
   constructor() {
     this.isTranslating = false;
@@ -1639,20 +1688,31 @@ class YRATranslator {
     return style.display === 'none' || style.visibility === 'hidden';
   }
 
+  // Convert an NLLB Flores code (e.g. "pbt_Arab") to a BCP-47 tag for the
+  // `lang` attribute. Non-Flores values (on-device ISO codes like "en", or
+  // empty) pass through unchanged.
+  toBcp47(language) {
+    if (!language || language.indexOf('_') === -1) return language;
+    const [lang3, script] = language.split('_');
+    const primary = NLLB_ISO3_TO_1[lang3] || lang3;
+    if (NLLB_SUPPRESS_SCRIPT[primary] === script) return primary;
+    return script ? `${primary}-${script}` : primary;
+  }
+
   addLangAttributeToElement(element, language) {
     if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
-    
+
     // Don't add lang to certain elements that shouldn't have it
     const skipElements = ['SCRIPT', 'STYLE', 'META', 'HEAD', 'HTML'];
     if (skipElements.includes(element.tagName)) return;
-    
+
     // Store original lang attribute for restoration
     if (!element.dataset.yraOriginalLang) {
       element.dataset.yraOriginalLang = element.getAttribute('lang') || '';
     }
-    
-    // Set the language attribute
-    element.setAttribute('lang', language);
+
+    // Set the language attribute (normalized to BCP-47)
+    element.setAttribute('lang', this.toBcp47(language));
   }
 
   async translateIframes(sourceLanguage, targetLanguage, addLangAttributes) {

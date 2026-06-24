@@ -121,6 +121,25 @@ async function main() {
   assert.equal(t.textTranslationCache.get('nllb:eng_Latn-deu_Latn:Hello'), 'DE:Hello');
   console.log('PASS  submit -> poll round trip via background proxy contract');
 
+  // 4) Flores code -> BCP-47 lang attribute conversion
+  const bcp47 = {
+    'eng_Latn': 'en',        // 639-1 + suppress default Latn
+    'arb_Arab': 'ar',        // macrolanguage 639-1 + suppress Arab
+    'pbt_Arab': 'ps',        // Southern Pashto -> ps + suppress Arab
+    'srp_Cyrl': 'sr',        // suppress default Cyrl
+    'uzn_Latn': 'uz',
+    'zho_Hans': 'zh-Hans',   // keep script (Chinese has no suppress)
+    'zho_Hant': 'zh-Hant',
+    'ceb_Latn': 'ceb-Latn',  // no 639-1 -> 639-3 + script (valid fallback)
+    'yue_Hant': 'yue-Hant',
+    'en': 'en',              // on-device ISO passthrough (no underscore)
+    '': '',
+  };
+  for (const [code, expected] of Object.entries(bcp47)) {
+    assert.equal(t.toBcp47(code), expected, `toBcp47(${code}) -> ${t.toBcp47(code)}, expected ${expected}`);
+  }
+  console.log('PASS  Flores code -> BCP-47 lang attribute conversion');
+
   console.log('\nALL EXTENSION BATCH-LOGIC CHECKS PASSED');
   process.exit(0);
 }
